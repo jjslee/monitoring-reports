@@ -1,0 +1,23 @@
+---
+title: "Untitled"
+author: "Jeff"
+date: "2026-09-02"
+output: html_document
+---
+
+```{r}
+library(officer)
+giiyr <- 2026
+```
+
+
+```{r}
+doc_1 <- read_docx() |>
+  body_add_par("Hello world!", style = "heading 1") |>
+  body_add_par("", style = "Normal") |>
+  body_add_table(airquality, style = "table_template")
+
+print(doc_1, target = fs::path_home_r(paste0("GII/",giiyr,"/monitoring/reports/example/example_1.docx")))
+      
+```
+

@@ -1,0 +1,230 @@
+---
+title: "GII Economy Monitoring Dashboard"
+output:
+  officedown::rdocx_document:
+    reference_docx: reference.docx
+    page_margins:
+      bottom: 0.5
+      top: 0.5
+      right: 0.5
+      left: 0.5
+      gutter: 0
+params:
+  iso3: "BTN"
+  giiyr: 2025
+  reported_counts_path: "reported_counts.rds"
+  indicator_list_path: "full_indicator_list.rds"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+
+library(tidyverse)
+library(officer)
+library(officedown)
+library(flextable)
+
+set_flextable_defaults(font.size = 8, padding = 3, theme_fun = theme_vanilla)
+
+# ---- assumption constants (tune to match official GII methodology) --------
+IN_MIN_REQUIRED   <- 35   # minimum Input indicators required (per report text)
+OUT_MIN_REQUIRED  <- 15   # minimum Output indicators required (per report text)
+SUBPILLAR_PASS_FRAC <- 0.5  # a sub-pillar "counts" if >= this share of its indicators are reported
+
+# ---- palette matching the dashboard legend --------------------------------
+col_new       <- "#C6E0B4"  # green
+col_outdated  <- "#BDD7EE"  # blue
+col_very_out  <- "#F4B183"  # orange/red (5-9y & 10y)
+col_missing   <- "#F8CBAD"  # pink/red
+col_excluded  <- "#D9D9D9"  # grey
+col_header_in <- "#548235"  # dark green (Input pillars)
+col_header_out<- "#2E75B6"  # dark blue (Output pillars)
+
+# ---- load data --------------------------------------------------------
+reported_counts <- readRDS(params$reported_counts_path)
+indicator_list  <- readRDS(params$indicator_list_path)
+
+iso3  <- params$iso3
+giiyr <- params$giiyr
+
+country_name <- iso3
+if (requireNamespace("countrycode", quietly = TRUE)) {
+  nm <- countrycode::countrycode(iso3, "iso3c", "country.name")
+  if (!is.na(nm)) country_name <- nm
+}
+
+rc <- reported_counts %>% filter(ISO3 == iso3)
+if (nrow(rc) == 0) stop("ISO3 '", iso3, "' not found in reported_counts")
+rc <- rc %>% slice(1)
+
+ind <- indicator_list %>%
+  filter(ISO3 == iso3, GIIYR == giiyr) %>%
+  arrange(SUBINDEX_NAME, PILLAR_NAME, SUBPILLAR, INDICATOR)
+```
+
+# GII Economy Monitoring Dashboard
+
+## `r country_name`
+
+This report provides an overview of the indicator availability and data timeliness for a
+selected economy. For an economy to feature in the GII `r giiyr`, the minimum data
+coverage requirement is at least `r IN_MIN_REQUIRED` indicators in the Innovation Input
+Sub-Index and `r OUT_MIN_REQUIRED` indicators in the Innovation Output Sub-Index, with
+scores for at least two sub-pillars per pillar.
+
+```{r summary-table}
+max_missing_in  <- rc$IN_INDICATORS  - IN_MIN_REQUIRED
+max_missing_out <- rc$OUT_INDICATORS - OUT_MIN_REQUIRED
+
+summary_df <- tibble(
+  Scope       = c("All", "Inputs", "Outputs"),
+  Total       = c(rc$N_REPORTED,  rc$IN_REPORTED,  rc$OUT_REPORTED),
+  New         = c(rc$N_CURRENT,   rc$IN_CURRENT,   rc$OUT_CURRENT),
+  Out_Total   = c(rc$N_OUTDATED,  rc$IN_OUTDATED,  rc$OUT_OUTDATED),
+  Out_1_4     = c(rc$N_OUTDATED_1_4, rc$IN_OUTDATED_1_4, rc$OUT_OUTDATED_1_4),
+  Out_5_9     = c(rc$N_OUTDATED_5_9, rc$IN_OUTDATED_5_9, rc$OUT_OUTDATED_5_9),
+  Out_10      = c(rc$N_OUTDATED_10,  rc$IN_OUTDATED_10,  rc$OUT_OUTDATED_10),
+  Missing     = c(rc$N_MISSING,   rc$IN_MISSING,   rc$OUT_MISSING),
+  MaxMissing  = c(NA_real_, max_missing_in, max_missing_out)
+)
+
+ft <- flextable(summary_df,
+  col_keys = c("Scope", "Total", "New", "Out_Total", "Out_1_4",
+               "Out_5_9", "Out_10", "Missing", "MaxMissing")) %>%
+  set_header_labels(
+    Scope = "", Total = "Total", New = "New",
+    Out_Total = "Total", Out_1_4 = "1-4y", Out_5_9 = "5-9y", Out_10 = "10y",
+    Missing = "Missing", MaxMissing = "Max missing"
+  ) %>%
+  add_header_row(values = c("", "Reported", "", "Outdated", "", "", "", "", ""),
+                  colwidths = rep(1, 9), top = TRUE) %>%
+  merge_at(i = 1, j = 2:3, part = "header") %>%
+  merge_at(i = 1, j = 4:7, part = "header") %>%
+  align(align = "center", part = "all") %>%
+  bg(j = "New", bg = col_new, part = "body") %>%
+  bg(j = c("Out_Total", "Out_1_4", "Out_5_9"), bg = col_outdated, part = "body") %>%
+  bg(j = "Out_10", bg = col_very_out, part = "body") %>%
+  bg(j = "Missing", bg = col_missing, part = "body") %>%
+  bg(j = "MaxMissing", bg = "white", part = "body") %>%
+  color(j = "MaxMissing", color = "red", part = "body") %>%
+  bold(j = "Scope", part = "body") %>%
+  autofit()
+
+ft
+```
+
+```{r shares-table}
+pct <- function(x, n) round(100 * x / n)
+
+shares_df <- tibble(
+  Reported = pct(rc$N_REPORTED, rc$N_INDICATORS),
+  New      = pct(rc$N_CURRENT,  rc$N_INDICATORS),
+  Outdated = pct(rc$N_OUTDATED, rc$N_INDICATORS),
+  Missing  = pct(rc$N_MISSING,  rc$N_INDICATORS)
+) %>%
+  mutate(across(everything(), ~ paste0(.x, "%")))
+
+flextable(shares_df) %>%
+  align(align = "center", part = "all") %>%
+  fontsize(size = 14, part = "body") %>%
+  autofit()
+```
+
+```{r pillar-constraint}
+# A sub-pillar "counts" toward the pillar total if at least SUBPILLAR_PASS_FRAC
+# of its indicators are reported (assumption - tune constant above).
+subpillar_status <- ind %>%
+  group_by(SUBINDEX_NAME, PILLAR_NAME, SUBPILLAR) %>%
+  summarise(
+    n_ind     = n(),
+    n_reported = sum(!is.na(DATAYR)),
+    pass = (n_reported / n_ind) >= SUBPILLAR_PASS_FRAC,
+    .groups = "drop"
+  )
+
+pillar_order <- c("Institutions", "Human capital and research", "Infrastructure",
+                   "Market sophistication", "Business sophistication",
+                   "Knowledge and technology outputs", "Creative outputs")
+
+pillar_df <- subpillar_status %>%
+  group_by(PILLAR_NAME) %>%
+  summarise(n_subpillars_passing = sum(pass), .groups = "drop") %>%
+  right_join(tibble(PILLAR_NAME = pillar_order), by = "PILLAR_NAME") %>%
+  mutate(n_subpillars_passing = replace_na(n_subpillars_passing, 0)) %>%
+  arrange(match(PILLAR_NAME, pillar_order))
+
+is_input_pillar <- pillar_df$PILLAR_NAME %in%
+  c("Institutions", "Human capital and research", "Infrastructure",
+    "Market sophistication", "Business sophistication")
+
+row_names  <- as_tibble(setNames(as.list(pillar_df$PILLAR_NAME), pillar_order))
+row_counts <- as_tibble(setNames(as.list(as.character(pillar_df$n_subpillars_passing)), pillar_order))
+pc_wide <- bind_rows(row_names, row_counts)
+
+ft_pc <- flextable(pc_wide) %>%
+  delete_part(part = "header") %>%
+  align(align = "center", part = "all") %>%
+  fontsize(size = 7, part = "body") %>%
+  bold(i = 2) %>%
+  autofit()
+
+for (k in seq_along(pillar_order)) {
+  hdr_col <- if (is_input_pillar[k]) col_header_in else col_header_out
+  ft_pc <- bg(ft_pc, i = 1, j = k, bg = hdr_col, part = "body")
+  ft_pc <- color(ft_pc, i = 1, j = k, color = "white", part = "body")
+  ft_pc <- bg(ft_pc, i = 2, j = k, bg = col_new, part = "body")
+}
+
+ft_pc
+```
+
+\newpage
+
+## Full indicator reporting status for GII `r giiyr`
+
+```{r indicator-status}
+ind_status <- ind %>%
+  mutate(
+    excluded = str_detect(NAME, "\\*$"),
+    age = giiyr - DATAYR,
+    status = case_when(
+      excluded            ~ "EXCLUDED",
+      is.na(DATAYR)       ~ "MISSING",
+      age <= 0             ~ "NEW",
+      age >= 1 & age <= 4  ~ "OUTDATED_1_4",
+      age >= 5 & age <= 9  ~ "OUTDATED_5_9",
+      age >= 10            ~ "OUTDATED_10",
+      TRUE                 ~ "NEW"
+    )
+  ) %>%
+  select(SUBINDEX_NAME, PILLAR_NAME, SUBPILLAR, INDICATOR, NAME, DATAYR, MODEYR, status)
+
+status_colors <- c(
+  NEW = col_new, OUTDATED_1_4 = col_outdated, OUTDATED_5_9 = col_outdated,
+  OUTDATED_10 = col_very_out, MISSING = col_missing, EXCLUDED = col_excluded
+)
+
+ft_ind <- flextable(ind_status,
+  col_keys = c("SUBINDEX_NAME", "PILLAR_NAME", "SUBPILLAR", "INDICATOR",
+               "NAME", "DATAYR", "MODEYR")) %>%
+  set_header_labels(
+    SUBINDEX_NAME = "SubIdx", PILLAR_NAME = "Pillar", SUBPILLAR = "SubPillar",
+    INDICATOR = "Level", NAME = "Indicator Name",
+    DATAYR = "Data Year", MODEYR = "Mode Year"
+  ) %>%
+  fontsize(size = 7, part = "all") %>%
+  align(j = c("DATAYR", "MODEYR"), align = "center", part = "all") %>%
+  autofit()
+
+for (s in names(status_colors)) {
+  rows <- which(ind_status$status == s)
+  if (length(rows) > 0) {
+    ft_ind <- bg(ft_ind, i = rows, bg = status_colors[[s]], part = "body")
+  }
+}
+
+ft_ind
+```
+
+*Indicator is excluded from the data minimum criteria (DMC) rules. Legend: NEW (green),
+OUTDATED (blue), VERY OUTDATED (orange), MISSING (pink), EXCLUDED (grey).

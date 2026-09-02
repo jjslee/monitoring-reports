@@ -1,0 +1,394 @@
+---
+title: "missing-outdated-prep"
+author: "Jeff"
+date: "2026-08-31"
+output: html_document
+---
+
+# Missing and outdated
+
+This script is used to do the prep work for the missing and outdated. The final files are exported and used in python.
+
+## Load libraries
+
+```{r preamble, include=FALSE}
+
+## Initiate 
+## ... source files
+source(fs::path_home_r("projects/gii/src/sql_tools.R"))
+
+## ... additional packages
+library(boxr)
+# library(countrycode)
+library(tidyr)
+library(dplyr)
+library(DBI)
+library(stringr)
+library(purrr)
+library(zoo)
+# library(openxlsx)
+# library(utils)
+# library(giipack)
+# library(dbplyr)
+# library(sf)
+
+giiyr <- 2026
+
+```
+
+# Connect to cluster db
+
+```{r cluster-db, include=FALSE}
+con <- giipack::connectMariaDB("js")
+```
+
+# Load economy
+```{r load-economy, include=FALSE}
+e <- DBI::dbGetQuery(con, glue::glue("
+                                       SELECT ISO3, ECONOMY_NAME,
+                                              SUBREG_UN,
+                                              INTREG_UN
+                                       FROM gii.economy_id
+                                       WHERE ISO2 != 'WD'
+                                      "
+                                     )) |> distinct()
+      
+
+active_idx <- DBI::dbGetQuery(con, glue::glue("
+                                               SELECT GIIYR,CODE,NAME,LEVEL_TYPE,
+                                               SUBINDEX,PILLAR,SUBPILLAR,INDICATOR,EXPORT,MODEYR
+                                               FROM gii.active_index
+                                               WHERE GIIYR = {giiyr}
+                                              "
+                                     )) |> distinct()
+
+
+p <- DBI::dbGetQuery(con, glue::glue("
+                                     SELECT GIIYR,CODE,ISO3,DATAYR,
+                                     VALUE_UNSCALED,VALUE_SCALED,SCALE_FACTOR
+                                     FROM gii.indicator_prep
+                                     WHERE GIIYR = {giiyr}
+                                     "
+                                     )) |> distinct()
+
+
+m <- DBI::dbGetQuery(con, glue::glue("
+                                     SELECT *
+                                     FROM gii.model
+                                     WHERE GIIYR = {giiyr}
+                                     "
+                                     )) |> select(-c(INDEX,RANK_LB:DMC)) |> distinct()
+
+giiecon <- unique(m$ISO3)
+pillar_name <- active_idx %>% dplyr::filter(LEVEL_TYPE=="Pillar") %>% 
+               dplyr::select(PILLAR,PILLAR_NAME=NAME) %>% distinct()
+subpillar_name <- active_idx %>% dplyr::filter(LEVEL_TYPE=="SubPillar") %>% 
+                  dplyr::select(SUBPILLAR,SUBPILLAR_NAME=NAME) %>% distinct()
+indicator_name <- active_idx %>% dplyr::filter(LEVEL_TYPE=="Indicator") %>% 
+                  dplyr::select(INDICATOR_NAME=INDICATOR,NAME) %>% distinct()
+```
+
+Raw data
+```{r}
+raw <- p %>% dplyr::inner_join(active_idx %>% filter(LEVEL_TYPE=="Indicator"), by=c("GIIYR","CODE"))
+```
+
+Transform to indicator_audit
+```{r}
+## Replicates ind_to_model() for one CODE's data (single EXPORT value)
+replicate_export <- function(df, giiyr) {
+  
+  export <- unique(df$EXPORT)
+  stopifnot(length(export) == 1)
+  method <- str_to_lower(export)
+  code   <- unique(df$CODE)
+
+  # browser()
+  ## Common prep (identical across all methods)
+  df <- df |>
+        dplyr::filter(GIIYR == giiyr, 
+                      DATAYR >= giiyr - 11, 
+                      DATAYR <= giiyr) |>
+        dplyr::arrange(ISO3,EXPORT)
+
+
+  if (all(is.na(df$VALUE_SCALED))) {
+    df$VALUE_SCALED <- NULL
+    df$SCALE_FACTOR <- NULL
+  }
+
+  var <- if ("VALUE_SCALED" %in% names(df)) "VALUE_SCALED" else "VALUE_UNSCALED"
+  
+  df <- df |>
+        rename(VALUE = !!sym(var)) |>
+        filter(!is.na(VALUE))
+
+  
+  
+  if (method == "backcast") {
+    # browser()
+    df <- df |>
+          dplyr::group_by(ISO3) |>
+          dplyr::mutate(DATAYR_MAX = max(DATAYR, na.rm = TRUE),
+                        DATAYR_ALL = NA_character_) |>
+          dplyr::ungroup() |>
+          dplyr::filter(DATAYR == DATAYR_MAX) |>
+          dplyr::mutate(CODE = code) |>
+          dplyr::select(GIIYR, CODE, ISO3, DATAYR, VALUE, DATAYR_ALL)
+
+    
+  } else if (method == "current") {
+    # browser()
+    df <- df |>
+          dplyr::mutate(DATAYR_MAX = max(DATAYR, na.rm = TRUE),
+                        DATAYR_ALL = NA_character_) |>
+          dplyr::filter(DATAYR == DATAYR_MAX) |>
+          dplyr::mutate(CODE = code) |>
+          dplyr::select(GIIYR, CODE, ISO3, DATAYR, VALUE, DATAYR_ALL)
+
+    
+  } else if (grepl("^moveave\\d", method)) {
+    # browser()
+    n <- as.integer(str_extract(method, "\\d$"))
+    df <- df |>
+      dplyr::group_by(ISO3) |>
+      complete(DATAYR = seq(min(DATAYR), max(DATAYR))) |>
+      dplyr::arrange(ISO3, desc(DATAYR)) |>
+      dplyr::mutate(ID = row_number()) |>
+      dplyr::ungroup() |>
+      dplyr::filter(ID <= n, !is.na(VALUE)) |>
+      dplyr::arrange(ISO3, DATAYR) |>
+      dplyr::group_by(GIIYR, ISO3) |>
+      dplyr::mutate(DATAYR_ALL = list(DATAYR),
+                    DATAYR_ALL = purrr::map_chr(DATAYR_ALL, 
+                                         ~paste(.x, collapse = ","))) |>
+      dplyr::group_by(GIIYR, ISO3, DATAYR_ALL) |>
+      dplyr::summarise(VALUE = mean(VALUE, na.rm = TRUE),
+                       DATAYR = max(DATAYR, na.rm = TRUE),
+                       .groups = "drop") |>
+      dplyr::mutate(CODE = code) |>
+      dplyr::select(GIIYR, CODE, ISO3, DATAYR, VALUE, DATAYR_ALL)
+
+    
+  } else if (method == "resmoveave3") {
+    # browser()
+    yrs3 <- df |>
+            dplyr::distinct(DATAYR) |>
+            dplyr::arrange(desc(DATAYR)) |>
+            dplyr::slice_head(n = 3) |>
+            dplyr::pull(DATAYR)
+
+    # browser()
+    df <- df |>
+      dplyr::filter(DATAYR %in% yrs3) |>
+      dplyr::group_by(GIIYR, ISO3) |>
+      dplyr::mutate(DATAYR_ALL = list(DATAYR),
+                    DATAYR_ALL = map_chr(DATAYR_ALL, ~paste(.x, collapse = ","))) |>
+      dplyr::group_by(GIIYR, ISO3, DATAYR_ALL) |>
+      summarise(VALUE = mean(VALUE, na.rm = TRUE),
+                DATAYR = max(DATAYR, na.rm = TRUE),
+                .groups = "drop") |>
+      dplyr::mutate(CODE = code) |>
+      dplyr::select(GIIYR, CODE, ISO3, DATAYR, VALUE, DATAYR_ALL)
+
+  } else {
+    stop("Unknown EXPORT method: ", export)
+  }
+
+  df
+}
+```
+
+final indicator_audit
+```{r}
+result <- raw |>
+          group_split(CODE) |>
+          map_dfr(replicate_export, giiyr = giiyr)
+```
+
+
+```{r}
+#### In GII 26: Exceptionally, for BRB this is to be based on 3 year average of scaled value in PCTOrgin
+result %>% filter(CODE=="PatOrig",ISO3=="BRB")
+
+brb_pctorg_val <- p %>% filter(CODE=="PatOrig",ISO3=="BRB") %>%
+                  dplyr::mutate(
+                  # VALUE_UNSCALED_AVG3Y = rollmean(VALUE_UNSCALED, k = 3, fill = NA, align = "right"),
+                  VALUE_SCALED_AVG3Y = rollmean(VALUE_SCALED, k = 3, fill = NA, align = "right"),
+                  # SCALE_FACTOR_AVG3Y = rollmean(SCALE_FACTOR, k = 3, fill = NA, align = "right")
+                  ) %>% filter(DATAYR==2022) %>% pull(VALUE_SCALED_AVG3Y)
+
+brb_pctorg_val
+
+
+result <- result %>%
+            dplyr::mutate(VALUE = if_else(CODE == "PatOrig" &
+                                          ISO3 == "BRB",
+                                          brb_pctorg_val, VALUE))
+```
+
+mode years
+```{r}
+# get_mode <- function(x) {
+#   x <- x[!is.na(x)]
+#   ux <- unique(x)
+#   ux[which.max(tabulate(match(x, ux)))]
+# }
+
+```
+
+
+```{r}
+
+full_index <- tidyr::expand_grid(
+                                  ISO3 = unique(result$ISO3),
+                                  active_idx %>% 
+                                    dplyr::filter(LEVEL_TYPE == "Indicator") %>% 
+                                    dplyr::select(-EXPORT)
+                                )
+indicator <-  full_index %>% 
+              
+              dplyr::mutate(SUBINDEX_NAME=dplyr::if_else(SUBINDEX=="IN","Inputs","Outputs"),
+                            GIIECON=dplyr::if_else(ISO3 %in% giiecon,1,NA_real_)
+                            ) %>% 
+              dplyr::left_join(pillar_name, by="PILLAR") %>% 
+              dplyr::left_join(subpillar_name, by="SUBPILLAR") %>% 
+  
+              dplyr::left_join(result, by = c("GIIYR", "CODE", "ISO3")) %>% 
+
+              # dplyr::mutate(VALUE = if_else(CODE == "PatOrig" & 
+              #                                 ISO3 == "BRB", 
+              #                                 brb_pctorg_val, VALUE)) %>% 
+  
+              dplyr::mutate(
+    
+                  YRS_FROM_MODE = abs(DATAYR-MODEYR),
+                  YRS_FROM_GIIYR = abs(DATAYR-giiyr),
+      
+                  CURRENT = if_else(DATAYR >= MODEYR, 1, NA_real_),
+                  
+                  OUTDATED = if_else(DATAYR < MODEYR, 1, NA_real_),
+                  
+                  OUTDATED_1_4y = if_else(OUTDATED == TRUE &
+                                            (YRS_FROM_GIIYR >= 1 &
+                                             YRS_FROM_GIIYR <= 4  
+                                             ),1, NA_real_),
+                  
+                  OUTDATED_5_9y = if_else(OUTDATED == TRUE &
+                                            (YRS_FROM_GIIYR >= 5 &
+                                             YRS_FROM_GIIYR <= 9  
+                                             ),1, NA_real_),
+                  
+                  OUTDATED_10y = if_else(OUTDATED == TRUE &
+                                            (YRS_FROM_GIIYR >= 10 &
+                                             YRS_FROM_GIIYR <= 11  
+                                             ),1, NA_real_),
+                  
+                  MISSING = if_else(is.na(VALUE) & 
+                                      CODE != "UtilModOrig", 1, NA_real_)
+              ) %>% 
+  
+              dplyr::arrange(ISO3)
+  
+            
+          
+indicator.summary <- indicator %>%
+                      dplyr::group_by(ISO3) %>%
+                      dplyr::summarise(
+                        N_INDICATORS   = dplyr::n(),
+                        N_CURRENT      = sum(CURRENT, na.rm = TRUE),
+                        N_OUTDATED     = sum(OUTDATED, na.rm = TRUE),
+                        N_REPORTED     = sum(c(N_CURRENT,N_OUTDATED), na.rm = TRUE),
+                        N_OUTDATED_1_4 = sum(OUTDATED_1_4y, na.rm = TRUE),
+                        N_OUTDATED_5_9 = sum(OUTDATED_5_9y, na.rm = TRUE),
+                        N_OUTDATED_10  = sum(OUTDATED_10y, na.rm = TRUE),
+                        N_MISSING      = sum(MISSING, na.rm = TRUE),
+                        S_REPORTED     = round(N_REPORTED/N_INDICATORS*100,0),
+                        S_CURRENT      = round(N_CURRENT/N_INDICATORS*100,0),
+                        S_OUTDATED     = round(N_OUTDATED/N_INDICATORS*100,0),
+                        S_MISSING      = round(N_MISSING/N_INDICATORS*100,0),
+                        .groups = "drop"
+                      ) %>%
+                      dplyr::relocate(N_REPORTED, .before=N_CURRENT) %>% 
+                      dplyr::arrange(ISO3) 
+
+
+input_indicator.summary <- indicator %>%
+                            dplyr::filter(SUBINDEX=="IN") %>% 
+                            dplyr::group_by(ISO3) %>%
+                            dplyr::summarise(
+                              IN_INDICATORS   = dplyr::n(),
+                              IN_CURRENT      = sum(CURRENT, na.rm = TRUE),
+                              IN_OUTDATED     = sum(OUTDATED, na.rm = TRUE),
+                              IN_REPORTED     = sum(c(IN_CURRENT,IN_OUTDATED), na.rm = TRUE),
+                              IN_OUTDATED_1_4 = sum(OUTDATED_1_4y, na.rm = TRUE),
+                              IN_OUTDATED_5_9 = sum(OUTDATED_5_9y, na.rm = TRUE),
+                              IN_OUTDATED_10  = sum(OUTDATED_10y, na.rm = TRUE),
+                              IN_MISSING      = sum(MISSING, na.rm = TRUE),
+                              .groups = "drop"
+                            ) %>% 
+                            dplyr::relocate(IN_REPORTED, .before=IN_CURRENT) %>% 
+                            dplyr::arrange(ISO3) 
+
+
+output_indicator.summary <- indicator %>%
+                            dplyr::filter(SUBINDEX=="OUT") %>% 
+                            dplyr::group_by(ISO3) %>%
+                            dplyr::summarise(
+                              OUT_INDICATORS   = dplyr::n(),
+                              OUT_CURRENT      = sum(CURRENT, na.rm = TRUE),
+                              OUT_OUTDATED     = sum(OUTDATED, na.rm = TRUE),
+                              OUT_REPORTED     = sum(c(OUT_CURRENT,OUT_OUTDATED), na.rm = TRUE),
+                              OUT_OUTDATED_1_4 = sum(OUTDATED_1_4y, na.rm = TRUE),
+                              OUT_OUTDATED_5_9 = sum(OUTDATED_5_9y, na.rm = TRUE),
+                              OUT_OUTDATED_10  = sum(OUTDATED_10y, na.rm = TRUE),
+                              OUT_MISSING      = sum(MISSING, na.rm = TRUE),
+                              .groups = "drop"
+                            ) %>% 
+                            dplyr::relocate(OUT_REPORTED, .before=OUT_CURRENT) %>% 
+                            dplyr::arrange(ISO3) 
+
+### Pillar count - each pillar needs two subpillars
+pillar <- indicator %>% 
+          dplyr::filter(!is.na(VALUE)) %>%
+          dplyr::distinct(GIIYR, ISO3, PILLAR, SUBPILLAR) %>%
+          count(ISO3, GIIYR, PILLAR, name = "n_subpillars_with_value")
+
+
+
+non_gii_full_indicator_list  <- indicator %>% 
+                                dplyr::mutate(GIIECON=dplyr::if_else(ISO3 %in% giiecon,1,NA_real_)) %>%
+                                dplyr::filter(is.na(GIIECON)) %>% 
+                                dplyr::select(GIIYR,ISO3,SUBINDEX_NAME,PILLAR_NAME,
+                                              SUBPILLAR,INDICATOR,NAME,DATAYR,MODEYR) %>% 
+                                distinct()
+
+non_gii_reported_counts  <- indicator.summary %>% 
+                            dplyr::left_join(input_indicator.summary, by="ISO3") %>% 
+                            dplyr::left_join(output_indicator.summary, by="ISO3") %>% 
+                            dplyr::mutate(GIIECON=dplyr::if_else(ISO3 %in% giiecon,1,NA_real_)) %>% 
+                            dplyr::filter(is.na(GIIECON)) %>% 
+                            distinct()
+
+```
+
+
+```{r}
+write.csv(non_gii_full_indicator_list, 
+          file = fs::path_home_r(paste0("GII/",giiyr,"/monitoring/data/non_gii_full_indicator_list.csv")))
+
+write.csv(non_gii_reported_counts, 
+          file = fs::path_home_r(paste0("GII/",giiyr,"/monitoring/data/non_gii_reported_counts.csv")))
+
+# save(full_indicator_list, reported_counts, file = "gii_data.RData")
+# saveRDS(full_indicator_list, "full_indicator_list.rds")
+# saveRDS(reported_counts, "reported_counts.rds")
+```
+
+
+# AWS disconnect
+
+```{r}
+DBI::dbDisconnect(con)
+```
+
