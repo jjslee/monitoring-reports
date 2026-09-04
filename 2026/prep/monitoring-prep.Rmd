@@ -36,9 +36,26 @@ giiyr <- 2026
 
 ```
 
-# Connect to cluster db
 
-```{r cluster-db, include=FALSE}
+# Connect to Box
+```{r}
+## Connect to Box
+l.box <- giipack::connectBox(giiyr)
+l.box$monitoringFolder <- boxr::box_search(query = "Monitoring reports",
+                                          content_types = "name",
+                                          type = "folder",
+                                          ancestor_folder_ids = l.box$wd) |>
+                                          as.data.frame() |>
+                                          dplyr::pull(id) |>
+                          boxr::box_ls() |> as.data.frame() |> 
+                          dplyr::filter(name=="data") %>% dplyr::pull(id)
+
+```
+
+
+# Connect to AWS
+
+```{r aws-db, include=FALSE}
 con <- giipack::connectMariaDB("js")
 ```
 
@@ -62,6 +79,13 @@ active_idx <- DBI::dbGetQuery(con, glue::glue("
                                               "
                                      )) |> distinct()
 
+source_info <- DBI::dbGetQuery(con, glue::glue("
+                                               SELECT GIIYR,CODE,SOURCE
+                                               FROM gii.indicator_id
+                                               WHERE GIIYR = {giiyr}
+                                               AND STATUS = 'Active'
+                                              "
+                                     )) |> distinct()
 
 p <- DBI::dbGetQuery(con, glue::glue("
                                      SELECT GIIYR,CODE,ISO3,DATAYR,
@@ -202,12 +226,12 @@ replicate_export <- function(df, giiyr) {
 final indicator_audit
 ```{r}
 result <- raw |>
-          group_split(CODE) |>
-          map_dfr(replicate_export, giiyr = giiyr)
+          dplyr::group_split(CODE) |>
+          purrr::map_dfr(replicate_export, giiyr = giiyr)
 ```
 
 
-```{r}
+```{r gii26-brb-adj}
 #### In GII 26: Exceptionally, for BRB this is to be based on 3 year average of scaled value in PCTOrgin
 result %>% filter(CODE=="PatOrig",ISO3=="BRB")
 
@@ -245,21 +269,22 @@ full_index <- tidyr::expand_grid(
                                   active_idx %>% 
                                     dplyr::filter(LEVEL_TYPE == "Indicator") %>% 
                                     dplyr::select(-EXPORT)
-                                )
+                                ) 
+
 indicator <-  full_index %>% 
               
               dplyr::mutate(SUBINDEX_NAME=dplyr::if_else(SUBINDEX=="IN","Inputs","Outputs"),
                             GIIECON=dplyr::if_else(ISO3 %in% giiecon,1,NA_real_)
                             ) %>% 
+  
               dplyr::left_join(pillar_name, by="PILLAR") %>% 
               dplyr::left_join(subpillar_name, by="SUBPILLAR") %>% 
   
               dplyr::left_join(result, by = c("GIIYR", "CODE", "ISO3")) %>% 
-
-              # dplyr::mutate(VALUE = if_else(CODE == "PatOrig" & 
-              #                                 ISO3 == "BRB", 
-              #                                 brb_pctorg_val, VALUE)) %>% 
   
+              dplyr::left_join(e, by="ISO3") %>% 
+
+
               dplyr::mutate(
     
                   YRS_FROM_MODE = abs(DATAYR-MODEYR),
@@ -285,9 +310,20 @@ indicator <-  full_index %>%
                                              ),1, NA_real_),
                   
                   MISSING = if_else(is.na(VALUE) & 
-                                      CODE != "UtilModOrig", 1, NA_real_)
+                                      CODE != "UtilModOrig", 1, NA_real_),
+                  
+                  EXCLUDED = if_else(is.na(VALUE) & 
+                                      CODE == "UtilModOrig", 1, NA_real_),
+                  
+                  STATUS = dplyr::case_when(
+                                            CURRENT == 1 ~ "CURRENT",
+                                            OUTDATED == 1 ~ "OUTDATED",
+                                            MISSING == 1 ~ "MISSING",
+                                            EXCLUDED == 1 ~ "EXCLUDED",
+                                            )
               ) %>% 
-  
+              dplyr::left_join(source_info, by=c("GIIYR","CODE")) %>% 
+              dplyr::relocate(ECONOMY_NAME,.before=ISO3) %>% 
               dplyr::arrange(ISO3)
   
             
@@ -356,29 +392,49 @@ pillar <- indicator %>%
 
 
 
-non_gii_full_indicator_list  <- indicator %>% 
-                                dplyr::mutate(GIIECON=dplyr::if_else(ISO3 %in% giiecon,1,NA_real_)) %>%
-                                dplyr::filter(is.na(GIIECON)) %>% 
-                                dplyr::select(GIIYR,ISO3,SUBINDEX_NAME,PILLAR_NAME,
-                                              SUBPILLAR,INDICATOR,NAME,DATAYR,MODEYR) %>% 
-                                distinct()
+indicator_status  <- indicator %>% 
+                      dplyr::mutate(GIIECON=dplyr::if_else(ISO3 %in% giiecon,1,NA_real_)) %>%
+                      dplyr::select(GIIYR,ISO3,SUBINDEX_NAME,PILLAR_NAME,
+                                    SUBPILLAR,INDICATOR,NAME,DATAYR,MODEYR,
+                                    STATUS,SOURCE,GIIECON) %>% 
+                      distinct()
 
-non_gii_reported_counts  <- indicator.summary %>% 
-                            dplyr::left_join(input_indicator.summary, by="ISO3") %>% 
-                            dplyr::left_join(output_indicator.summary, by="ISO3") %>% 
-                            dplyr::mutate(GIIECON=dplyr::if_else(ISO3 %in% giiecon,1,NA_real_)) %>% 
-                            dplyr::filter(is.na(GIIECON)) %>% 
-                            distinct()
+indicator_counts  <- indicator.summary %>% 
+                      dplyr::left_join(input_indicator.summary, by="ISO3") %>% 
+                      dplyr::left_join(output_indicator.summary, by="ISO3") %>% 
+                      dplyr::mutate(GIIECON=dplyr::if_else(ISO3 %in% giiecon,1,NA_real_),
+                                    GIIYR=giiyr) %>% 
+                      dplyr::left_join(e,by="ISO3") %>%
+                      dplyr::relocate(c(GIIYR,ECONOMY_NAME),.before=ISO3) %>% 
+                      distinct()
 
 ```
 
 
-```{r}
-write.csv(non_gii_full_indicator_list, 
-          file = fs::path_home_r(paste0("GII/",giiyr,"/monitoring/data/non_gii_full_indicator_list.csv")))
+# Write to BOX
 
-write.csv(non_gii_reported_counts, 
-          file = fs::path_home_r(paste0("GII/",giiyr,"/monitoring/data/non_gii_reported_counts.csv")))
+```{r}
+
+boxr::box_write(object = reported_counts,
+                file_name = paste0("indicator_counts_",giiyr,".csv"),
+                dir_id = l.box$monitoringFolder,
+                write_fun = readr::write_csv)
+
+boxr::box_write(object = indicator_status,
+                file_name = paste0("indicator_status_",giiyr,".csv"),
+                dir_id = l.box$monitoringFolder,
+                write_fun = readr::write_csv)
+```
+
+```{r}
+
+
+
+# write.csv(non_gii_full_indicator_list, 
+#           file = fs::path_home_r(paste0("GII/",giiyr,"/monitoring/data/non_gii_full_indicator_list.csv")))
+# 
+# write.csv(non_gii_reported_counts, 
+#           file = fs::path_home_r(paste0("GII/",giiyr,"/monitoring/data/non_gii_reported_counts.csv")))
 
 # save(full_indicator_list, reported_counts, file = "gii_data.RData")
 # saveRDS(full_indicator_list, "full_indicator_list.rds")
