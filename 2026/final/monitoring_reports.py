@@ -11,9 +11,10 @@ Last updated: 11 August 2026
 # standard libraries
 import os
 
-# import re
+import re
+import unicodedata
 import pandas as pd
-# import numpy as np
+import numpy as np
 import math
 
 # # import graphics
@@ -50,10 +51,36 @@ indicator_status_file   = './data/indicator_status_2026.csv'
 indicator_counts_file   = './data/indicator_counts_2026.csv'
 templatePath            = './template/template.docx'
 
+### for ranks
+SUFFIXES = {1: 'ˢᵗ', 2: 'ⁿᵈ', 3: 'ʳᵈ'}
+def ordinal(num):
+    # I'm checking for 10-20 because those are the digits that
+    # don't follow the normal counting scheme. 
+    if 10 <= num % 100 <= 20:
+        suffix = 'ᵗʰ'
+    else:
+        # the second parameter is a default.
+        suffix = SUFFIXES.get(num % 10, 'ᵗʰ')
+    return str(num) + suffix
+
+def adjname(name):
+    s = unicodedata.normalize('NFKD', name)
+    s = s.encode('ascii', 'ignore').decode('ascii')   # drop accents
+    s = re.sub(r'[^A-Za-z0-9]+', '_', s)              # anything else -> _
+    return s.strip('_').lower()
+
 #%% Reading in data
 
 ## Reading data files
 df_indicator_counts_full = pd.read_csv(indicator_counts_file, header=0)
+df_indicator_counts_full['ECONOMY_NAME_CLN'] = (
+                                                df_indicator_counts_full['ECONOMY_NAME'].map(adjname)
+                                            )
+
+### setting nans to 0 - add to prep script later
+p_cols = ['P1', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7']
+df_indicator_counts_full[p_cols] = df_indicator_counts_full[p_cols].fillna(0).astype(int)
+
 df_indicator_status_full = pd.read_csv(indicator_status_file, header=0).query("STATUS in ['MISSING', 'OUTDATED']")\
                             .reset_index(drop=True)\
                                 .assign(DATAYR=lambda d: d["DATAYR"].astype("Int64").astype("string").fillna(""),
@@ -70,16 +97,31 @@ omax = max_output_indicators - output_dmc
 
 #%% Getting cluster specific dataframe
 all_economies = df_indicator_counts_full["ISO3"].drop_duplicates().tolist()
-nongii_economies = df_indicator_counts_full[(df_indicator_counts_full['GIIECON'] != 1) | (df_indicator_counts_full['GIIECON'].isna())]["ISO3"].drop_duplicates().tolist()
+nongii_economies = df_indicator_counts_full[(df_indicator_counts_full['GIIECON'] != 1) | 
+                                            (df_indicator_counts_full['GIIECON'].isna())]["ISO3"].drop_duplicates().tolist()
 economies = nongii_economies 
-
 
 ### regional aggregates
 df_region = df_indicator_counts_full[['ECONOMY_NAME', 'ISO3', 'S_MISSING', 
-                                      'S_OUTDATED', 'SUBREG_UN', 'INTREG_UN','GIIECON']].copy()
-SHARE_COL='N_MISSING'
+                                      'S_OUTDATED', 'SUBREG_UN', 'INTREG_UN',
+                                      'GIIECON']].copy()
 
-def region_stats(df, group_col, share_col=SHARE_COL):
+## inter-regional ranks - rank within each region; 1 = lowest value
+grp = df_region.groupby('INTREG_UN')
+df_region['S_MISSING_RANK'] = grp['S_MISSING'].rank(
+    method='min', ascending=True
+).astype(int)
+
+df_region['S_OUTDATED_RANK'] = grp['S_OUTDATED'].rank(
+    method='min', ascending=True
+).astype(int)
+
+
+def region_stats(df, group_col, share_col=None):
+    
+    if share_col is None:
+        raise ValueError("Column share - S_MISSING or S_OUTDATED is required")
+        
     g = df.groupby(group_col)[share_col]
     out = pd.DataFrame({
         "n":    g.size(),
@@ -91,24 +133,23 @@ def region_stats(df, group_col, share_col=SHARE_COL):
         "mean": g.mean(),
     })
 
-    # economy holding the extreme value in each region
-    def holder(idx, label):
-        h = df.loc[idx, [group_col, "ECONOMY_NAME", share_col, "GIIECON"]].copy()
-        h["GIIECON"] = h["GIIECON"].eq(1).map({True: "GII", False: "Non-GII"})
-        return (h.set_index(group_col)
-                 .rename(columns={"ECONOMY_NAME": label + "_econ",
-                                  share_col:      label + "_val",
-                                  "GIIECON":      label + "_gii"}))
+    # # economy holding the extreme value in each region
+    # def holder(idx, label):
+    #     h = df.loc[idx, [group_col, "ECONOMY_NAME", share_col, "GIIECON"]].copy()
+    #     h["GIIECON"] = h["GIIECON"].eq(1).map({True: "GII", False: "Non-GII"})
+    #     return (h.set_index(group_col)
+    #              .rename(columns={"ECONOMY_NAME": label + "_econ",
+    #                               share_col:      label + "_val",
+    #                               "GIIECON":      label + "_gii"}))
 
-    out = out.join(holder(g.idxmin(), "least_missing"))     # lowest missing count
-    out = out.join(holder(g.idxmax(), "highest_missing"))   # highest missing count
+    # out = out.join(holder(g.idxmin(), "least_missing"))     # lowest missing count
+    # out = out.join(holder(g.idxmax(), "highest_missing"))   # highest missing count
     return out.round(1)
 
-# subreg_stats_missing = region_stats(df_region, "SUBREG_UN", 'N_MISSING')
+#### Inter-Regional stats
 intreg_stats_missing = region_stats(df_region, "INTREG_UN", 'S_MISSING').reset_index()
 intreg_stats_outdated = region_stats(df_region, "INTREG_UN", 'S_OUTDATED').reset_index()
-
-
+    
 # # Set colors for the plots
 # colours = ['#EC651F','#76B82A','#23B9D6','#8C96B1',
 #            '#EAB494','#C2D99C','#A3DAE8','#CED2DE']
@@ -179,7 +220,7 @@ rename_cols = {
 
 ###### START LOOP FOR EACH CLUSTER HERE
 ## Temp override, REMOVE LATER!!!!!!!!!
-iso3 = economies[0]
+# iso3 = economies[1]
 # iso3 = economies[2]
 # iso3 = economies[18]
 # iso3 = economies[98]
@@ -218,7 +259,15 @@ for iso3 in economies: #all_clusters: #[0:3]:
     df_bench = df_indicator_counts_full.loc[ 
                 df_indicator_counts_full["INTREG_UN"] == econ_intregion].\
                   reset_index(drop=True).rename(columns={"ECONOMY_NAME": "LABEL"})
-    # df_bench["LABEL"] = df_bench["ECONOMY_NAME"].replace(label_short)
+   
+    #### region's rank
+    df_region_rank_ind = (
+                            df_region
+                            .query("ISO3 == @iso3")
+                            [['ISO3', 'S_MISSING_RANK', 'S_OUTDATED_RANK']]
+                                .reset_index(drop=True)
+                        )
+                                                            
     
     #### regional stats
     intreg_stats_missing_ind = intreg_stats_missing.loc[ 
@@ -294,6 +343,7 @@ for iso3 in economies: #all_clusters: #[0:3]:
     
     ## set variables for report
     econ = str(df_indicator_counts_ind.at[0,"ECONOMY_NAME"])
+    econ_cln = str(df_indicator_counts_ind.at[0,"ECONOMY_NAME_CLN"])
     giiyr = str(giiyr)
     idmc = str(input_dmc)
     odmc = str(output_dmc)
@@ -352,11 +402,12 @@ for iso3 in economies: #all_clusters: #[0:3]:
     m_q3 = "{:.1%}".format((intreg_stats_missing_ind.at[0,"q3"]/100))
     m_max = "{:.1%}".format((intreg_stats_missing_ind.at[0,"max"]/100))
     m_avg = "{:.1%}".format((intreg_stats_missing_ind.at[0,"mean"]/100))
+    m_rank = ordinal(int(df_region_rank_ind.at[0,"S_MISSING_RANK"]))
     
-    m_econ_min_nm = str(intreg_stats_missing_ind.at[0,"least_missing_econ"]) + " economy"
-    m_econ_min_gii = str(intreg_stats_missing_ind.at[0,"least_missing_gii"])
-    m_econ_max_nm = str(intreg_stats_missing_ind.at[0,"highest_missing_econ"]) + " economy"
-    m_econ_max_gii = str(intreg_stats_missing_ind.at[0,"highest_missing_gii"])
+    # m_econ_min_nm = str(intreg_stats_missing_ind.at[0,"least_missing_econ"]) + " economy"
+    # m_econ_min_gii = str(intreg_stats_missing_ind.at[0,"least_missing_gii"])
+    # m_econ_max_nm = str(intreg_stats_missing_ind.at[0,"highest_missing_econ"]) + " economy"
+    # m_econ_max_gii = str(intreg_stats_missing_ind.at[0,"highest_missing_gii"])
     
     ### outdated
     o_min = "{:.1%}".format((intreg_stats_outdated_ind.at[0,"min"]/100))
@@ -365,15 +416,16 @@ for iso3 in economies: #all_clusters: #[0:3]:
     o_q3 = "{:.1%}".format((intreg_stats_outdated_ind.at[0,"q3"]/100))
     o_max = "{:.1%}".format((intreg_stats_outdated_ind.at[0,"max"]/100))
     o_avg = "{:.1%}".format((intreg_stats_outdated_ind.at[0,"mean"]/100))
-    
-    o_econ_min_nm = str(intreg_stats_outdated_ind.at[0,"least_missing_econ"])
-    o_econ_min_gii = str(intreg_stats_outdated_ind.at[0,"least_missing_gii"]) + " economy"
-    o_econ_max_nm = str(intreg_stats_outdated_ind.at[0,"highest_missing_econ"])
-    o_econ_max_gii = str(intreg_stats_outdated_ind.at[0,"highest_missing_gii"]) + " economy"
+    o_rank = ordinal(int(df_region_rank_ind.at[0,"S_OUTDATED_RANK"]))
+   
+    # o_econ_min_nm = str(intreg_stats_outdated_ind.at[0,"least_missing_econ"])
+    # o_econ_min_gii = str(intreg_stats_outdated_ind.at[0,"least_missing_gii"]) + " economy"
+    # o_econ_max_nm = str(intreg_stats_outdated_ind.at[0,"highest_missing_econ"])
+    # o_econ_max_gii = str(intreg_stats_outdated_ind.at[0,"highest_missing_gii"]) + " economy"
 
     
     # Filename
-    econfilename = econ + "_gii_" + giiyr + "_monitoring_report"
+    econfilename = "gii_" + giiyr + "_monitoring_report_" + econ_cln
     
 #%% Generate report
     
@@ -423,9 +475,9 @@ for iso3 in economies: #all_clusters: #[0:3]:
                 'o2_59y': o_in_59y,
                 'o3_59y': o_out_59y,
                 
-                'o1_10y': o_tot_59y,
-                'o2_10y': o_in_59y,
-                'o3_10y': o_out_59y,
+                'o1_10y': o_tot_10y,
+                'o2_10y': o_in_10y,
+                'o3_10y': o_out_10y,
                 
                 'm1': m_tot,
                 'm2': m_in,
@@ -453,10 +505,11 @@ for iso3 in economies: #all_clusters: #[0:3]:
                 'm_q3': m_q3,
                 'm_max': m_max,
                 'm_avg': m_avg,
-                'm_econ_min_nm': m_econ_min_nm,
-                'm_econ_min_gii': m_econ_min_gii,
-                'm_econ_max_nm': m_econ_max_nm,
-                'm_econ_max_gii': m_econ_max_gii,
+                'm_rank': m_rank,
+                # 'm_econ_min_nm': m_econ_min_nm,
+                # 'm_econ_min_gii': m_econ_min_gii,
+                # 'm_econ_max_nm': m_econ_max_nm,
+                # 'm_econ_max_gii': m_econ_max_gii,
                 
                 'o_min': o_min,
                 'o_q1': o_q1,
@@ -464,10 +517,11 @@ for iso3 in economies: #all_clusters: #[0:3]:
                 'o_q3': o_q3,
                 'o_max': o_max,
                 'o_avg': o_avg,
-                'o_econ_min_nm': o_econ_min_nm,
-                'o_econ_min_gii': o_econ_min_gii,
-                'o_econ_max_nm': o_econ_max_nm,
-                'o_econ_max_gii': o_econ_max_gii,
+                'o_rank': o_rank,
+                # 'o_econ_min_nm': o_econ_min_nm,
+                # 'o_econ_min_gii': o_econ_min_gii,
+                # 'o_econ_max_nm': o_econ_max_nm,
+                # 'o_econ_max_gii': o_econ_max_gii,
                 
                 'g_bench': g_bench,
                 
