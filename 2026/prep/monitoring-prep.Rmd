@@ -59,7 +59,7 @@ l.box$monitoringFolder <- boxr::box_search(query = "Monitoring reports",
 con <- giipack::connectMariaDB("js")
 ```
 
-# Load economy
+# Load
 ```{r load-economy, include=FALSE}
 e <- DBI::dbGetQuery(con, glue::glue("
                                        SELECT ISO3, ECONOMY_NAME,
@@ -112,7 +112,7 @@ indicator_name <- active_idx %>% dplyr::filter(LEVEL_TYPE=="Indicator") %>%
                   dplyr::select(INDICATOR_NAME=INDICATOR,NAME) %>% distinct()
 ```
 
-Raw data
+# Raw
 ```{r}
 raw <- p %>% dplyr::inner_join(active_idx %>% filter(LEVEL_TYPE=="Indicator"), by=c("GIIYR","CODE"))
 ```
@@ -261,7 +261,7 @@ mode years
 
 ```
 
-
+# Build
 ```{r}
 
 full_index <- tidyr::expand_grid(
@@ -290,7 +290,7 @@ indicator <-  full_index %>%
                   YRS_FROM_MODE = abs(DATAYR-MODEYR),
                   YRS_FROM_GIIYR = abs(DATAYR-giiyr),
       
-                  CURRENT = if_else(DATAYR >= MODEYR, 1, NA_real_),
+                  NEW = if_else(DATAYR >= MODEYR, 1, NA_real_),
                   
                   OUTDATED = if_else(DATAYR < MODEYR, 1, NA_real_),
                   
@@ -316,7 +316,7 @@ indicator <-  full_index %>%
                                       CODE == "UtilModOrig", 1, NA_real_),
                   
                   STATUS = dplyr::case_when(
-                                            CURRENT == 1 ~ "CURRENT",
+                                            NEW == 1 ~ "NEW",
                                             OUTDATED == 1 ~ "OUTDATED",
                                             MISSING == 1 ~ "MISSING",
                                             EXCLUDED == 1 ~ "EXCLUDED",
@@ -326,26 +326,24 @@ indicator <-  full_index %>%
               dplyr::relocate(ECONOMY_NAME,.before=ISO3) %>% 
               dplyr::arrange(ISO3)
   
-            
-          
 indicator.summary <- indicator %>%
                       dplyr::group_by(ISO3) %>%
                       dplyr::summarise(
                         N_INDICATORS   = dplyr::n(),
-                        N_CURRENT      = sum(CURRENT, na.rm = TRUE),
+                        N_NEW          = sum(NEW, na.rm = TRUE),
                         N_OUTDATED     = sum(OUTDATED, na.rm = TRUE),
-                        N_REPORTED     = sum(c(N_CURRENT,N_OUTDATED), na.rm = TRUE),
+                        N_REPORTED     = sum(c(N_NEW,N_OUTDATED), na.rm = TRUE),
                         N_OUTDATED_1_4 = sum(OUTDATED_1_4y, na.rm = TRUE),
                         N_OUTDATED_5_9 = sum(OUTDATED_5_9y, na.rm = TRUE),
                         N_OUTDATED_10  = sum(OUTDATED_10y, na.rm = TRUE),
                         N_MISSING      = sum(MISSING, na.rm = TRUE),
                         S_REPORTED     = round(N_REPORTED/N_INDICATORS*100,0),
-                        S_CURRENT      = round(N_CURRENT/N_INDICATORS*100,0),
+                        S_NEW          = round(N_NEW/N_INDICATORS*100,0),
                         S_OUTDATED     = round(N_OUTDATED/N_INDICATORS*100,0),
                         S_MISSING      = round(N_MISSING/N_INDICATORS*100,0),
                         .groups = "drop"
                       ) %>%
-                      dplyr::relocate(N_REPORTED, .before=N_CURRENT) %>% 
+                      dplyr::relocate(N_REPORTED, .before=N_NEW) %>% 
                       dplyr::arrange(ISO3) 
 
 
@@ -354,16 +352,16 @@ input_indicator.summary <- indicator %>%
                             dplyr::group_by(ISO3) %>%
                             dplyr::summarise(
                               IN_INDICATORS   = dplyr::n(),
-                              IN_CURRENT      = sum(CURRENT, na.rm = TRUE),
+                              IN_NEW          = sum(NEW, na.rm = TRUE),
                               IN_OUTDATED     = sum(OUTDATED, na.rm = TRUE),
-                              IN_REPORTED     = sum(c(IN_CURRENT,IN_OUTDATED), na.rm = TRUE),
+                              IN_REPORTED     = sum(c(IN_NEW,IN_OUTDATED), na.rm = TRUE),
                               IN_OUTDATED_1_4 = sum(OUTDATED_1_4y, na.rm = TRUE),
                               IN_OUTDATED_5_9 = sum(OUTDATED_5_9y, na.rm = TRUE),
                               IN_OUTDATED_10  = sum(OUTDATED_10y, na.rm = TRUE),
                               IN_MISSING      = sum(MISSING, na.rm = TRUE),
                               .groups = "drop"
                             ) %>% 
-                            dplyr::relocate(IN_REPORTED, .before=IN_CURRENT) %>% 
+                            dplyr::relocate(IN_REPORTED, .before=IN_NEW) %>% 
                             dplyr::arrange(ISO3) 
 
 
@@ -372,40 +370,47 @@ output_indicator.summary <- indicator %>%
                             dplyr::group_by(ISO3) %>%
                             dplyr::summarise(
                               OUT_INDICATORS   = dplyr::n(),
-                              OUT_CURRENT      = sum(CURRENT, na.rm = TRUE),
+                              OUT_NEW          = sum(NEW, na.rm = TRUE),
                               OUT_OUTDATED     = sum(OUTDATED, na.rm = TRUE),
-                              OUT_REPORTED     = sum(c(OUT_CURRENT,OUT_OUTDATED), na.rm = TRUE),
+                              OUT_REPORTED     = sum(c(OUT_NEW,OUT_OUTDATED), na.rm = TRUE),
                               OUT_OUTDATED_1_4 = sum(OUTDATED_1_4y, na.rm = TRUE),
                               OUT_OUTDATED_5_9 = sum(OUTDATED_5_9y, na.rm = TRUE),
                               OUT_OUTDATED_10  = sum(OUTDATED_10y, na.rm = TRUE),
                               OUT_MISSING      = sum(MISSING, na.rm = TRUE),
                               .groups = "drop"
                             ) %>% 
-                            dplyr::relocate(OUT_REPORTED, .before=OUT_CURRENT) %>% 
+                            dplyr::relocate(OUT_REPORTED, .before=OUT_NEW) %>% 
                             dplyr::arrange(ISO3) 
 
 ### Pillar count - each pillar needs two subpillars
 pillar <- indicator %>% 
           dplyr::filter(!is.na(VALUE)) %>%
           dplyr::distinct(GIIYR, ISO3, PILLAR, SUBPILLAR) %>%
-          count(ISO3, GIIYR, PILLAR, name = "n_subpillars_with_value")
+          count(ISO3, GIIYR, PILLAR, name = "n_subpillars_with_value") %>% 
+          tidyr::pivot_wider(names_from = PILLAR, 
+                             values_from = n_subpillars_with_value,
+                             names_prefix = "P")
 
+```
 
+# Final
+```{r}
+
+indicator_counts  <- indicator.summary %>% 
+                      dplyr::left_join(input_indicator.summary, by="ISO3") %>% 
+                      dplyr::left_join(output_indicator.summary, by="ISO3") %>% 
+                      dplyr::left_join(pillar, by="ISO3") %>% 
+                      dplyr::mutate(GIIECON=dplyr::if_else(ISO3 %in% giiecon,1,NA_real_),
+                                    GIIYR=giiyr) %>% 
+                      dplyr::left_join(e,by="ISO3") %>%
+                      dplyr::relocate(c(GIIYR,ECONOMY_NAME),.before=ISO3) %>% 
+                      distinct()
 
 indicator_status  <- indicator %>% 
                       dplyr::mutate(GIIECON=dplyr::if_else(ISO3 %in% giiecon,1,NA_real_)) %>%
                       dplyr::select(GIIYR,ISO3,SUBINDEX_NAME,PILLAR_NAME,
                                     SUBPILLAR,INDICATOR,NAME,DATAYR,MODEYR,
                                     STATUS,SOURCE,GIIECON) %>% 
-                      distinct()
-
-indicator_counts  <- indicator.summary %>% 
-                      dplyr::left_join(input_indicator.summary, by="ISO3") %>% 
-                      dplyr::left_join(output_indicator.summary, by="ISO3") %>% 
-                      dplyr::mutate(GIIECON=dplyr::if_else(ISO3 %in% giiecon,1,NA_real_),
-                                    GIIYR=giiyr) %>% 
-                      dplyr::left_join(e,by="ISO3") %>%
-                      dplyr::relocate(c(GIIYR,ECONOMY_NAME),.before=ISO3) %>% 
                       distinct()
 
 ```
@@ -415,7 +420,7 @@ indicator_counts  <- indicator.summary %>%
 
 ```{r}
 
-boxr::box_write(object = reported_counts,
+boxr::box_write(object = indicator_counts,
                 file_name = paste0("indicator_counts_",giiyr,".csv"),
                 dir_id = l.box$monitoringFolder,
                 write_fun = readr::write_csv)
