@@ -95,10 +95,13 @@ df_indicator_status_full = pd.read_csv(indicator_status_file, header=0).query("S
 max_input_indicators = df_indicator_counts_full["IN_INDICATORS"].drop_duplicates().iloc[0]
 max_output_indicators = df_indicator_counts_full["OUT_INDICATORS"].drop_duplicates().iloc[0]-1 ## subtract utility models
 
-input_dmc = math.floor(max_input_indicators * .66)
-output_dmc = math.floor(max_output_indicators * .66)
+# input_dmc = math.floor(max_input_indicators * .66)
+# output_dmc = math.floor(max_output_indicators * .66)
 
-imax = max_input_indicators - input_dmc - 1 ## !not sure why Lorena says 18!
+input_dmc = round((max_input_indicators * .66))
+output_dmc = round((max_output_indicators * .66))
+
+imax = max_input_indicators - input_dmc #- 1 ## !not sure why Lorena says 18!
 omax = max_output_indicators - output_dmc
 
 
@@ -110,23 +113,8 @@ nongii = (
             )
 
 
-# ### lt 20%
-# minreport = (
-#                 (df_indicator_counts_full["IN_SHARE"] < 0.2)
-#                 &      
-#                 (df_indicator_counts_full["OUT_SHARE"] < 0.2)
-#             )
 
-
-### ge 20% & lt 40%
-# minreport = (
-#                 ((df_indicator_counts_full["IN_SHARE"] >= 0.2) & (df_indicator_counts_full["IN_SHARE"] < 0.4))
-#                 &
-#                 ((df_indicator_counts_full["OUT_SHARE"] >= 0.2) & (df_indicator_counts_full["OUT_SHARE"] < 0.4))
-#             )
-
-
-### ge 40%
+## ge 40%
 minreport = (
                 (df_indicator_counts_full["IN_SHARE"] >= 0.4) 
                 &
@@ -134,7 +122,7 @@ minreport = (
             )
 
 
-# ### All other reports not satisfying above
+# # ### All other reports not satisfying above
 # minreport = (
 #                 (df_indicator_counts_full["IN_SHARE"] < 0.4)
 #                 |
