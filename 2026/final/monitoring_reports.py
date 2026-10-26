@@ -14,7 +14,7 @@ import os
 import re
 import unicodedata
 import pandas as pd
-import numpy as np
+# import numpy as np
 import math
 
 # # import graphics
@@ -77,6 +77,11 @@ df_indicator_counts_full['ECONOMY_NAME_CLN'] = (
                                                 df_indicator_counts_full['ECONOMY_NAME'].map(adjname)
                                             )
 
+### creating input and output shares - will add in prep script later
+df_indicator_counts_full["IN_SHARE"] = df_indicator_counts_full["IN_REPORTED"] / df_indicator_counts_full["IN_INDICATORS"]
+df_indicator_counts_full["OUT_SHARE"] = df_indicator_counts_full["OUT_REPORTED"] / df_indicator_counts_full["OUT_INDICATORS"]
+
+
 ### setting nans to 0 - add to prep script later
 p_cols = ['P1', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7']
 df_indicator_counts_full[p_cols] = df_indicator_counts_full[p_cols].fillna(0).astype(int)
@@ -86,6 +91,7 @@ df_indicator_status_full = pd.read_csv(indicator_status_file, header=0).query("S
                                 .assign(DATAYR=lambda d: d["DATAYR"].astype("Int64").astype("string").fillna(""),
                                         MODEYR=lambda d: d["MODEYR"].astype("Int64").astype("string").fillna(""))
 
+### data minimum criteria
 max_input_indicators = df_indicator_counts_full["IN_INDICATORS"].drop_duplicates().iloc[0]
 max_output_indicators = df_indicator_counts_full["OUT_INDICATORS"].drop_duplicates().iloc[0]-1 ## subtract utility models
 
@@ -95,11 +101,51 @@ output_dmc = math.floor(max_output_indicators * .66)
 imax = max_input_indicators - input_dmc - 1 ## !not sure why Lorena says 18!
 omax = max_output_indicators - output_dmc
 
+
+
 #%% Getting cluster specific dataframe
-all_economies = df_indicator_counts_full["ISO3"].drop_duplicates().tolist()
-nongii_economies = df_indicator_counts_full[(df_indicator_counts_full['GIIECON'] != 1) | 
-                                            (df_indicator_counts_full['GIIECON'].isna())]["ISO3"].drop_duplicates().tolist()
-economies = nongii_economies 
+nongii = (
+                (df_indicator_counts_full['GIIECON'] != 1) |
+                (df_indicator_counts_full['GIIECON'].isna())
+            )
+
+
+# ### lt 20%
+# minreport = (
+#                 (df_indicator_counts_full["IN_SHARE"] < 0.2)
+#                 &      
+#                 (df_indicator_counts_full["OUT_SHARE"] < 0.2)
+#             )
+
+
+### ge 20% & lt 40%
+# minreport = (
+#                 ((df_indicator_counts_full["IN_SHARE"] >= 0.2) & (df_indicator_counts_full["IN_SHARE"] < 0.4))
+#                 &
+#                 ((df_indicator_counts_full["OUT_SHARE"] >= 0.2) & (df_indicator_counts_full["OUT_SHARE"] < 0.4))
+#             )
+
+
+### ge 40%
+minreport = (
+                (df_indicator_counts_full["IN_SHARE"] >= 0.4) 
+                &
+                (df_indicator_counts_full["OUT_SHARE"] >= 0.4)
+            )
+
+
+# ### All other reports not satisfying above
+# minreport = (
+#                 (df_indicator_counts_full["IN_SHARE"] < 0.4)
+#                 |
+#                 (df_indicator_counts_full["OUT_SHARE"] < 0.4)
+#             )
+
+
+# all_economies = df_indicator_counts_full["ISO3"].drop_duplicates().tolist()
+nongii_economies = df_indicator_counts_full[ nongii & minreport ]["ISO3"].drop_duplicates().tolist()
+
+# economies = nongii_economies 
 
 ### regional aggregates
 df_region = df_indicator_counts_full[['ECONOMY_NAME', 'ISO3', 'S_MISSING', 
@@ -212,19 +258,20 @@ rename_cols = {
                 "PILLAR_NAME": "PN",
                 "SUBPILLAR": "SC",
                 "INDICATOR": "IC",
+                "NAME": "I",
                 "DATAYR": "DY",
                 "MODEYR": "MY",
-                "SOURCE": "S",
+                "SOURCE": "S"
             }    
 
 
 ###### START LOOP FOR EACH CLUSTER HERE
 ## Temp override, REMOVE LATER!!!!!!!!!
-# iso3 = economies[1]
-# iso3 = economies[2]
-# iso3 = economies[18]
-# iso3 = economies[98]
-for iso3 in economies: #all_clusters: #[0:3]:
+# iso3 = nongii_economies[1]
+# iso3 = nongii_economies[2]
+# iso3 = nongii_economies[18]
+# iso3 = nongii_economies[98]
+for iso3 in nongii_economies: #all_clusters: #[0:3]:
     
     print(iso3)
     
